@@ -449,9 +449,15 @@ def _build_chat_system_prompt(known_answers: dict) -> str:
         "interrogate them with a checklist. You don't need to ask about every "
         "field explicitly if they've already told you enough to infer it.",
         "",
-        "After every reply, call the update_stress_answers tool with any "
-        "fields you can now confidently infer or re-estimate, using exactly "
-        "these keys and ranges:",
+        "CRITICAL — every single turn MUST include a normal written reply to "
+        "the student, in plain text, as if you were simply chatting with "
+        "them. This is not optional and the tool call below does NOT count "
+        "as your reply — the student never sees the tool call, only your "
+        "written words. Never respond with a tool call and no text.",
+        "",
+        "Separately from that written reply, also call the update_stress_answers "
+        "tool on every turn with any fields you can now confidently infer or "
+        "re-estimate, using exactly these keys and ranges:",
     ]
     for f in FEATURE_SPEC:
         lines.append(f"  - {f['key']} ({f['chapter']}, {f['min']}-{f['max']}): {f['desc']}")
@@ -459,10 +465,10 @@ def _build_chat_system_prompt(known_answers: dict) -> str:
         "",
         f"Known so far: {json.dumps(known_answers)}",
         "",
-        "Keep replies short (2-4 sentences), warm, and non-clinical — this is "
-        "a peer check-in, not an intake form. Once you have reasonable "
-        "coverage across all five areas, say so and set ready_for_result to "
-        "true in your tool call.",
+        "Keep your written replies short (2-4 sentences), warm, and "
+        "non-clinical — this is a peer check-in, not an intake form. Once "
+        "you have reasonable coverage across all five areas, say so in your "
+        "written reply and set ready_for_result to true in your tool call.",
     ]
     return "\n".join(lines)
 
@@ -617,30 +623,52 @@ def _gemini_tool() -> dict:
 
 
 async def _call_gemini(api_key: str, system_prompt: str, messages: list) -> tuple[str, dict]:
-    body = {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": [
-            {"role": "model" if m.role == "assistant" else "user", "parts": [{"text": m.content}]}
-            for m in messages
-        ],
-        "tools": [{"functionDeclarations": [_gemini_tool()]}],
-        "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
-    }
+    # Gemini's function-calling "AUTO" mode means the model picks EITHER a
+    # text reply OR a function call — unlike Anthropic/OpenAI it doesn't
+    # reliably do both in one response. So this is two calls, not one:
+    #   1. A plain call with no tools at all — guarantees a real reply.
+    #   2. A call with the tool forced on ("ANY") purely to extract fields,
+    #      using the reply from step 1 as context. Its own text (if any)
+    #      is discarded; only the function call matters here.
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     url = GEMINI_URL_TMPL.format(model=GEMINI_MODEL)
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, headers=headers, json=body)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Gemini error ({resp.status_code}): {resp.text[:300]}")
+    contents = [
+        {"role": "model" if m.role == "assistant" else "user", "parts": [{"text": m.content}]}
+        for m in messages
+    ]
 
-    data = resp.json()
-    parts = (((data.get("candidates") or [{}])[0]).get("content") or {}).get("parts") or []
-    reply_text, tool_args = "", {}
-    for part in parts:
-        if "text" in part:
-            reply_text += part["text"]
-        elif "functionCall" in part and part["functionCall"].get("name") == "update_stress_answers":
-            tool_args = part["functionCall"].get("args", {}) or {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        reply_body = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": contents,
+        }
+        resp1 = await client.post(url, headers=headers, json=reply_body)
+        if resp1.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Gemini error ({resp1.status_code}): {resp1.text[:300]}")
+        parts1 = (((resp1.json().get("candidates") or [{}])[0]).get("content") or {}).get("parts") or []
+        reply_text = "".join(p.get("text", "") for p in parts1)
+
+        tool_args = {}
+        try:
+            extract_body = {
+                "systemInstruction": {"parts": [{
+                    "text": system_prompt + "\n\nCall update_stress_answers now with whatever you "
+                                             "can infer from the conversation so far (an empty object "
+                                             "if nothing new). Do not write any other text."
+                }]},
+                "contents": contents + [{"role": "model", "parts": [{"text": reply_text}]}],
+                "tools": [{"functionDeclarations": [_gemini_tool()]}],
+                "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["update_stress_answers"]}},
+            }
+            resp2 = await client.post(url, headers=headers, json=extract_body)
+            if resp2.status_code == 200:
+                parts2 = (((resp2.json().get("candidates") or [{}])[0]).get("content") or {}).get("parts") or []
+                for part in parts2:
+                    if "functionCall" in part and part["functionCall"].get("name") == "update_stress_answers":
+                        tool_args = part["functionCall"].get("args", {}) or {}
+        except httpx.RequestError:
+            pass  # extraction is best-effort — a failed/slow extraction shouldn't block the reply
+
     return reply_text, tool_args
 
 
