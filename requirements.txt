@@ -4,6 +4,5 @@ pydantic
 joblib
 numpy
 pandas
-scikit-learn==1.6.1
-tensorflow
+scikit-learn==1.7.2
 httpx

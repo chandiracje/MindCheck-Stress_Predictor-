@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: mindcheck-stress-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      # Set the actual values in the Render dashboard (Environment tab) —
+      # sync: false keeps them out of this file / your git history.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Optional overrides — remove if you're fine with the code's defaults.
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-5
+      - key: OPENAI_MODEL
+        value: gpt-5.4
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash

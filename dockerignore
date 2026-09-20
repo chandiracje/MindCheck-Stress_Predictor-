@@ -1,0 +1,11 @@
+aimlenv/
+venv/
+venv311/
+__pycache__/
+*.pyc
+.git
+.gitignore
+.env
+*.md
+.vscode/
+.idea/
