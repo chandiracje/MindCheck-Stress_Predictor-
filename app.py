@@ -1,8 +1,9 @@
 """
 Student Stress Level Prediction API
 -------------------------------------
-Loads the trained SVM, MLP, KNN, Logistic Regression, Random Forest (and,
-once trained, Naive Bayes) models plus the shared preprocessing artifacts,
+Loads the trained SVM, MLP, KNN, Logistic Regression, Random Forest, Naive
+Bayes, Gradient Boosting, Decision Tree, Extra Trees, LDA and K-Means models
+plus the shared preprocessing artifacts,
 and exposes a /predict endpoint that lets the caller choose which model
 to use.
 
@@ -108,6 +109,10 @@ MODEL_PIPELINE = {
     "logistic_regression": "anova",
     "random_forest": "embedded",
     "naive_bayes": "pca",
+    # Newer models (gradient_boosting, decision_tree, extra_trees, lda, kmeans)
+    # are NOT listed here on purpose: their pipeline is auto-detected at
+    # runtime from the saved model's feature_names_in_ / n_features_in_
+    # (see _resolve_pipeline). Add an entry here only to override that.
 }
 
 # Filenames on disk for each model, inside MODEL_DIR.
@@ -118,6 +123,11 @@ MODEL_FILENAMES = {
     "logistic_regression": "logistic_regression_model.pkl",
     "mlp": "mlp_tuned.pkl",
     "naive_bayes": "naive_bayes.pkl",
+    "gradient_boosting": "gradient_boosting_model.pkl",
+    "decision_tree": "decision_tree_model.pkl",
+    "extra_trees": "extra_trees_model.pkl",
+    "lda": "lda_model.pkl",
+    "kmeans": "kmeans_model.pkl",
 }
 
 # ---------------------------------------------------------------------
@@ -178,12 +188,20 @@ STRESS_LABELS = {0: "Low Stress", 1: "Medium Stress", 2: "High Stress"}
 # comparison chart in the UI (GET /metrics). Update these with your
 # actual final numbers once you have them for each retrained model.
 MODEL_METRICS = {
-    "random_forest": {"label": "Random Forest",        "test_accuracy": None, "cv_accuracy": None},
-    "svm":           {"label": "SVM",                  "test_accuracy": None, "cv_accuracy": None},
-    "mlp":           {"label": "Neural Net",           "test_accuracy": None, "cv_accuracy": None},
-    "knn":           {"label": "KNN",                  "test_accuracy": None, "cv_accuracy": None},
-    "logistic_regression": {"label": "Logistic Regression", "test_accuracy": None, "cv_accuracy": None},
-    "naive_bayes": {"label": "Naive Bayes", "test_accuracy": None, "cv_accuracy": None},
+    "random_forest": {"label": "Random Forest",        "test_accuracy": 0.8864, "cv_accuracy": 0.8830},
+    "svm":           {"label": "SVM",                  "test_accuracy": 0.8955, "cv_accuracy": 0.8750},
+    "mlp":           {"label": "Neural Net",           "test_accuracy": 0.9000, "cv_accuracy": 0.8880},
+    "knn":           {"label": "KNN",                  "test_accuracy": 0.8909, "cv_accuracy": 0.8886},
+    "logistic_regression": {"label": "Logistic Regression", "test_accuracy": 0.8909, "cv_accuracy": 0.8784},
+    "naive_bayes":   {"label": "Naive Bayes",          "test_accuracy": 0.8955, "cv_accuracy": 0.8886},
+    # New models — fill in the None values from your notebooks. Models with
+    # test_accuracy None are hidden from the front end's comparison chart.
+    "gradient_boosting": {"label": "Gradient Boosting", "test_accuracy": 0.8864, "cv_accuracy": 0.8795},
+    "decision_tree": {"label": "Decision Tree",        "test_accuracy": None,   "cv_accuracy": None},
+    "extra_trees":   {"label": "Extra Trees",          "test_accuracy": None,   "cv_accuracy": None},
+    "lda":           {"label": "LDA",                  "test_accuracy": None,   "cv_accuracy": None},
+    # K-Means has no CV score: it was tuned on train accuracy only (0.8875).
+    "kmeans":        {"label": "K-Means",              "test_accuracy": 0.8545, "cv_accuracy": None},
 }
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
@@ -195,7 +213,7 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 app = FastAPI(
     title="Student Stress Level Prediction API",
     description="Predicts stress level (Low/Medium/High) from 20 psychosocial indicators.",
-    version="3.0.0",
+    version="3.1.0",
 )
 
 app.add_middleware(
@@ -212,6 +230,7 @@ _preprocessor = None
 _pca = None
 _anova_features = None      # list[str] — ANOVA-selected 10 raw columns (KNN, Logistic Regression)
 _embedded_features = None   # list[str] — embedded/RF-selected 10 columns (Random Forest)
+_cluster_maps = {}          # model_id -> {cluster id: class label}, for K-Means-style models
 
 
 @app.on_event("startup")
@@ -247,7 +266,14 @@ def load_artifacts():
     for model_id, filename in MODEL_FILENAMES.items():
         path = os.path.join(MODEL_DIR, filename)
         if os.path.exists(path):
-            _models[model_id] = joblib.load(path)
+            loaded = joblib.load(path)
+            # K-Means is saved as {"model": KMeans, "mapping": {cluster: class}}
+            # because cluster ids mean nothing without the mapping.
+            if isinstance(loaded, dict) and "model" in loaded and "mapping" in loaded:
+                _models[model_id] = loaded["model"]
+                _cluster_maps[model_id] = {int(k): int(v) for k, v in loaded["mapping"].items()}
+            else:
+                _models[model_id] = loaded
         else:
             print(f"{filename} not found — skipping '{model_id}'.")
 
@@ -256,10 +282,11 @@ def load_artifacts():
     # fails loudly at startup instead of producing silently wrong predictions.
     expected_widths = {"pca": 2, "anova": len(_anova_features or []), "embedded": len(_embedded_features or [])}
     for model_id, model in _models.items():
-        pipeline = MODEL_PIPELINE.get(model_id)
+        pipeline = _resolve_pipeline(model_id, model)
         if pipeline is None:
-            print(f"NOTE: '{model_id}' has no pipeline mapping yet — add one to MODEL_PIPELINE before using it.")
+            print(f"NOTE: couldn't work out which pipeline '{model_id}' uses — add it to MODEL_PIPELINE before using it.")
             continue
+        print(f"'{model_id}' -> '{pipeline}' pipeline")
         n_in = getattr(model, "n_features_in_", None)
         expected = expected_widths.get(pipeline)
         if n_in is not None and expected and n_in != expected:
@@ -282,6 +309,11 @@ class ModelChoice(str, Enum):
     knn = "knn"
     logistic_regression = "logistic_regression"
     naive_bayes = "naive_bayes"
+    gradient_boosting = "gradient_boosting"
+    decision_tree = "decision_tree"
+    extra_trees = "extra_trees"
+    lda = "lda"
+    kmeans = "kmeans"
 
 
 class StressInput(BaseModel):
@@ -349,10 +381,39 @@ def _scale_and_engineer(payload: StressInput) -> pd.DataFrame:
     return scaled_df[FEATURE_COLUMNS + ENGINEERED_COLUMNS]
 
 
+def _resolve_pipeline(model_id: str, model) -> str | None:
+    """Explicit MODEL_PIPELINE entry wins. Otherwise detect the pipeline from
+    the saved model itself: 2 input features -> PCA; a feature-name set that
+    equals the ANOVA or embedded list -> that pipeline."""
+    explicit = MODEL_PIPELINE.get(model_id)
+    if explicit:
+        return explicit
+    names = getattr(model, "feature_names_in_", None)
+    if names is not None:
+        names = set(map(str, names))
+        if _anova_features and names == set(_anova_features):
+            return "anova"
+        if _embedded_features and names == set(_embedded_features):
+            return "embedded"
+    if getattr(model, "n_features_in_", None) == 2:
+        return "pca"
+    return None
+
+
+def _ordered(model, features: list) -> list:
+    """Use the model's own column order when it has one, so a different
+    order in the saved feature list can't silently scramble the inputs."""
+    names = getattr(model, "feature_names_in_", None)
+    if names is not None and set(map(str, names)) == set(features):
+        return [str(n) for n in names]
+    return features
+
+
 def _build_model_input(model_id: str, full_row: pd.DataFrame) -> np.ndarray:
     """Branches into the PCA / ANOVA / embedded pipeline depending on
     which dataset the given model was trained on."""
-    pipeline = MODEL_PIPELINE.get(model_id)
+    model = _models[model_id]
+    pipeline = _resolve_pipeline(model_id, model)
 
     if pipeline == "pca":
         if _pca is None:
@@ -363,17 +424,17 @@ def _build_model_input(model_id: str, full_row: pd.DataFrame) -> np.ndarray:
     if pipeline == "anova":
         if not _anova_features:
             raise HTTPException(status_code=503, detail="anova_top10_features.pkl not loaded.")
-        return full_row[_anova_features].values
+        return full_row[_ordered(model, _anova_features)].values
 
     if pipeline == "embedded":
         if not _embedded_features:
             raise HTTPException(status_code=503, detail="top10_features_list.pkl not loaded.")
-        return full_row[_embedded_features].values
+        return full_row[_ordered(model, _embedded_features)].values
 
     raise HTTPException(
         status_code=503,
-        detail=f"No preprocessing pipeline configured for '{model_id}' yet — "
-               f"add it to MODEL_PIPELINE once it's trained.",
+        detail=f"Couldn't work out the preprocessing pipeline for '{model_id}' — "
+               f"add it to MODEL_PIPELINE (\"pca\", \"anova\" or \"embedded\").",
     )
 
 
@@ -749,7 +810,13 @@ def predict(payload: StressInput, model: ModelChoice = ModelChoice.random_forest
 
     chosen_model = _models[model.value]
 
-    pred_class = int(chosen_model.predict(X)[0])
+    raw_pred = int(chosen_model.predict(X)[0])
+    if model.value in _cluster_maps:
+        # K-Means: predict() returns a cluster id, so translate it to a
+        # class using the mapping saved with the model.
+        pred_class = _cluster_maps[model.value][raw_pred]
+    else:
+        pred_class = raw_pred
     confidence = None
     probabilities = None
     if hasattr(chosen_model, "predict_proba"):
