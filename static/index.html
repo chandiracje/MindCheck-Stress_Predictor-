@@ -1496,18 +1496,18 @@
         const AVAILABLE_MODELS = [{
             id: "random_forest",
             name: "Random Forest",
-            isDefault: true,
-            desc: "Highest accuracy & best overall balance."
+            isDefault: false,
+            desc: "Ensemble of decision trees on the 10 most important features."
         }, {
             id: "svm",
             name: "SVM",
             isDefault: false,
-            desc: "Clean linear decision boundaries."
+            desc: "Kernel (RBF) decision boundaries on PCA-reduced features."
         }, {
             id: "mlp",
             name: "Neural Net",
-            isDefault: false,
-            desc: "Deep pattern detection (MLP)."
+            isDefault: true,
+            desc: "Small neural network (MLP) on PCA features. Highest test accuracy."
         }, {
             id: "knn",
             name: "KNN",
@@ -1572,7 +1572,7 @@
 
         const state = {
             modelChosen: false,
-            model: "random_forest",
+            model: "mlp",
             mode: null,          // "chat" | "manual"
             stage: "intro",      // intro | chat | questions | loading | result
             qIndex: 0,
@@ -1628,37 +1628,15 @@
                 }
             } catch (err) {
                 // Fallback metrics for offline preview
+                // Offline-preview values = final test results from the project report (n = 220).
+                // cv_accuracy = 5-fold CV mean (MLP value is F1-macro, the metric its grid search used).
                 state.metrics = {
-                    "random_forest": {
-                        "label": "Random Forest",
-                        "test_accuracy": 0.9000,
-                        "cv_accuracy": 0.8864
-                    },
-                    "svm": {
-                        "label": "SVM",
-                        "test_accuracy": 0.8909,
-                        "cv_accuracy": 0.8864
-                    },
-                    "mlp": {
-                        "label": "Neural Net",
-                        "test_accuracy": 0.8720,
-                        "cv_accuracy": 0.8650
-                    },
-                    "knn": {
-                        "label": "KNN",
-                        "test_accuracy": 0.8540,
-                        "cv_accuracy": 0.8410
-                    },
-                    "logistic_regression": {
-                        "label": "Logistic Regression",
-                        "test_accuracy": 0.8350,
-                        "cv_accuracy": 0.8200
-                    },
-                    "naive_bayes": {
-                        "label": "Naive Bayes",
-                        "test_accuracy": 0.8100,
-                        "cv_accuracy": 0.8000
-                    }
+                    "random_forest": { "label": "Random Forest", "test_accuracy": 0.8864, "cv_accuracy": 0.8830 },
+                    "svm":           { "label": "SVM",           "test_accuracy": 0.8955, "cv_accuracy": 0.8750 },
+                    "mlp":           { "label": "Neural Net",    "test_accuracy": 0.9000, "cv_accuracy": 0.8880 },
+                    "knn":           { "label": "KNN",           "test_accuracy": 0.8909, "cv_accuracy": 0.8886 },
+                    "logistic_regression": { "label": "Logistic Regression", "test_accuracy": 0.8909, "cv_accuracy": 0.8784 },
+                    "naive_bayes":   { "label": "Naive Bayes",   "test_accuracy": 0.8955, "cv_accuracy": 0.8886 }
                 };
                 render();
             }
